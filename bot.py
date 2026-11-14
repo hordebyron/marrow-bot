@@ -63,6 +63,7 @@ def load_json(path, default):
 CONFIG = load_json(CONFIG_PATH, {})
 BYRON_DISCORD_ID = int(CONFIG.get("byron_discord_id") or 0)
 ALLOWED_CHANNEL_IDS = set(CONFIG.get("allowed_channel_ids") or [])
+LOG_CHANNEL_ID = int(CONFIG.get("log_channel_id") or 0)
 MAX_DHC = float(CONFIG.get("max_dhc_per_reward", 100))
 MAX_WAX = float(CONFIG.get("max_wax_per_reward", 5))
 MAX_NFT = int(CONFIG.get("max_nft_per_reward", 1))
@@ -149,6 +150,17 @@ class Marrow(discord.Client):
         print(f"Marrow logged in as {self.user}")
         print(f"Byron Discord ID set: {bool(BYRON_DISCORD_ID)}")
 
+    async def report(self, line: str) -> None:
+        """Post a short note to #bot-logs so Muse can read it later.
+        No log channel set yet means no report, just the local file log."""
+        if not LOG_CHANNEL_ID:
+            return
+        try:
+            channel = self.get_channel(LOG_CHANNEL_ID) or await self.fetch_channel(LOG_CHANNEL_ID)
+            await channel.send(f"Marrow log: {line}")
+        except Exception as e:
+            print(f"report to bot-logs failed: {e}")
+
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
@@ -180,6 +192,7 @@ class Marrow(discord.Client):
             save_wallets(data)
             await message.reply(f"Registered <@{did}> as WAX account `{wax}`. I will pass that to Muse for the whitelist.")
             log_line(f"REGISTER <@{did}> -> {wax} (by Byron)")
+            await self.report(f"Byron registered <@{did}> as WAX `{wax}`.")
             return
 
         m = SELF_REGISTER_RE.search(text)
@@ -191,6 +204,7 @@ class Marrow(discord.Client):
             save_wallets(data)
             await message.reply(f"Got it, {message.author.mention}. I wrote down your WAX name `{wax}`, Muse will add you to the whitelist for the WANT ON THE LIST drop.")
             log_line(f"WHITELIST {message.author} ({did}) -> {wax}")
+            await self.report(f"{message.author} registered WAX `{wax}` for the WANT ON THE LIST drop.")
             return
 
         m = REWARD_RE.search(text) or REWARD_SOME_RE.search(text)
@@ -230,6 +244,7 @@ class Marrow(discord.Client):
                     return
             await message.reply(f"Passed to Muse: send {label} to {target}. I send nothing myself, Muse sends it from horderewards and will report back.")
             log_line(f"REWARD REQUEST by Byron: send {label} to {target} - Muse to send from horderewards")
+            await self.report(f"REWARD REQUEST by Byron: send {label} to {target}. Muse to send from horderewards.")
             return
 
         # Listening / replying: only when spoken to directly.

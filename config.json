@@ -14,5 +14,6 @@
   "notes": "Byron Discord ID set 14 Nov 2026. Rewards are sent by Muse directly from horderewards, not by the bot in Discord. dry_run MUST stay true until Byron has tested it and says go live.",
   "wax_sender_account": "horderewards",
   "server_id": 872566495291514920,
-  "application_id": 1571231235852734495
+  "application_id": 1571231235852734495,
+  "log_channel_id": 0
 }
