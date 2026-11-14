@@ -47,8 +47,12 @@ import discord
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
-WALLETS_PATH = HERE / "discord-wallets.json"
-LOG_PATH = HERE / "rewards-log.md"
+# FadeHost keeps /data across deploys, repo files do not. Wallets and
+# the rewards log must live in /data on the host, or a redeploy
+# would wipe every WAX name people registered in Discord.
+DATA_DIR = Path("/data") if Path("/data").exists() else HERE
+WALLETS_PATH = DATA_DIR / "discord-wallets.json"
+LOG_PATH = DATA_DIR / "rewards-log.md"
 
 def load_json(path, default):
     try:
@@ -126,6 +130,7 @@ GREETING_RE = re.compile(
 
 def log_line(line: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with LOG_PATH.open("a") as f:
         f.write(f"- {ts} - {line}\n")
 
@@ -136,6 +141,7 @@ def wallets() -> dict:
 
 def save_wallets(data: dict) -> None:
     data["_comment"] = "Discord user ID -> WAX account. Filled in when a person gives Marrow their WAX name."
+    WALLETS_PATH.parent.mkdir(parents=True, exist_ok=True)
     WALLETS_PATH.write_text(json.dumps(data, indent=2) + "\n")
 
 class Marrow(discord.Client):

@@ -16,9 +16,9 @@ Live since 14 Nov 2026, hosted free on FadeHost, deployed from this repo. When c
 
 - `bot.py` — the bot, discord.py 2.7.1
 - `config.json` — Byron Discord ID, server ID, allowed channels, reward limits
-- `discord-wallets.json` — Discord user ID to WAX account, filled in as people register
+- `discord-wallets.json` — Discord user ID to WAX account, filled in as people register. On FadeHost this file lives in /data, so a redeploy does not wipe it. The copy in this repo is only the starter.
 - `prize-pool.json` — prize NFTs, currently example only
-- `rewards-log.md` — reward requests, registrations, whitelist adds
+- `rewards-log.md` — reward requests, registrations, whitelist adds. On FadeHost this also lives in /data.
 - `requirements.txt` — discord.py==2.7.1, aiohttp==3.14.5
 
 ## Commands
