@@ -1,0 +1,18 @@
+{
+  "allowed_channel_ids": [
+    872566495291514923
+  ],
+  "bot_name": "Marrow",
+  "byron_discord_id": 808557830356729866,
+  "daily_dhc_cap": 500,
+  "dhc_contract": "dahordescoin",
+  "dry_run": true,
+  "max_dhc_per_reward": 100,
+  "max_nft_per_reward": 1,
+  "max_wax_per_reward": 5,
+  "min_seconds_between_rewards": 30,
+  "notes": "Byron Discord ID set 14 Nov 2026. Rewards are sent by Muse directly from horderewards, not by the bot in Discord. dry_run MUST stay true until Byron has tested it and says go live.",
+  "wax_sender_account": "horderewards",
+  "server_id": 872566495291514920,
+  "application_id": 1571231235852734495
+}
