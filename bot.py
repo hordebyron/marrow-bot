@@ -44,6 +44,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import discord
+from discord.ext import tasks
 
 HERE = Path(__file__).resolve().parent
 CONFIG_PATH = HERE / "config.json"
@@ -91,6 +92,63 @@ BYRON_REGISTER_RE = re.compile(
     re.IGNORECASE,
 )
 HELP_RE = re.compile(rf"{PREFIX}\s+(?:help|status)", re.IGNORECASE)
+PUZZLE_START_RE = re.compile(rf"{PREFIX}\s+(?:start|new)\s+(?:a\s+)?puzzle", re.IGNORECASE)
+PUZZLE_STOP_RE = re.compile(rf"{PREFIX}\s+stop\s+(?:the\s+)?puzzle", re.IGNORECASE)
+PUZZLE_SHOW_RE = re.compile(rf"{PREFIX}\s+puzzle", re.IGNORECASE)
+
+# Small puzzle game, Byron starts it, anyone can answer.
+# One active puzzle per channel. First correct answer wins.
+# Marrow never sends a reward itself, it just logs the winner
+# to #bot-logs so Muse can see it. Rewards are Byron-only.
+# Questions live in puzzles.json (100+ easy zombie ones).
+# No question repeats until every question has been used once.
+# If the channel goes quiet for 2 hours, Marrow asks a question
+# on its own, and asks no more until someone answers it.
+PUZZLES_PATH = HERE / "puzzles.json"
+USED_PATH = DATA_DIR / "puzzle-used.json"
+
+def normalize_answer(text: str) -> str:
+    text = text.strip().lower()
+    text = re.sub(r"[^a-z0-9 ]", "", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+def load_puzzles():
+    data = load_json(PUZZLES_PATH, [])
+    out = []
+    for item in data:
+        q = (item.get("q") or "").strip()
+        answers = {normalize_answer(a) for a in item.get("answers") or []}
+        if q and answers:
+            out.append({"q": q, "answers": answers})
+    return out
+
+PUZZLES = load_puzzles()
+
+def used_questions() -> set:
+    return set(load_json(USED_PATH, []))
+
+def save_used(used: set) -> None:
+    USED_PATH.parent.mkdir(parents=True, exist_ok=True)
+    USED_PATH.write_text(json.dumps(sorted(used), indent=2) + "\n")
+
+def next_puzzle():
+    """Pick a random question that has not been used yet.
+    When every question has been used, start the list over."""
+    used = used_questions()
+    fresh = [p for p in PUZZLES if p["q"] not in used]
+    if not fresh:
+        save_used(set())
+        fresh = list(PUZZLES)
+    puzzle = random.choice(fresh)
+    used.add(puzzle["q"])
+    save_used(used)
+    return puzzle
+
+_active_puzzles = {}
+_pending_another = {}   # channel id -> time a win was announced
+_last_activity = {}     # channel id -> monotonic time of last message
+IDLE_SECONDS = 2 * 60 * 60
+PUZZLE_CHANNEL_ID = int((CONFIG.get("allowed_channel_ids") or [0])[0] or 0)
 
 _last_chat_at = {}
 
@@ -149,6 +207,47 @@ class Marrow(discord.Client):
     async def on_ready(self):
         print(f"Marrow logged in as {self.user}")
         print(f"Byron Discord ID set: {bool(BYRON_DISCORD_ID)}")
+        print(f"Puzzle questions loaded: {len(PUZZLES)}")
+        _last_activity[PUZZLE_CHANNEL_ID] = asyncio.get_event_loop().time()
+        if PUZZLE_CHANNEL_ID and not self._idle_puzzle_check.is_running():
+            self._idle_puzzle_check.start()
+
+    @tasks.loop(minutes=5)
+    async def _idle_puzzle_check(self):
+        """If the puzzle channel has been quiet for 2 hours, ask a
+        question on Marrow's own. Never ask a second one while the
+        first is still unanswered, or while waiting on a
+        'do you want another question' reply."""
+        if not PUZZLE_CHANNEL_ID or not PUZZLES:
+            return
+        now = asyncio.get_event_loop().time()
+        last = _last_activity.get(PUZZLE_CHANNEL_ID, now)
+        if now - last < IDLE_SECONDS:
+            return
+        if PUZZLE_CHANNEL_ID in _active_puzzles:
+            return
+        pending_since = _pending_another.get(PUZZLE_CHANNEL_ID)
+        if pending_since and now - pending_since < IDLE_SECONDS:
+            return
+        _pending_another.pop(PUZZLE_CHANNEL_ID, None)
+        try:
+            channel = self.get_channel(PUZZLE_CHANNEL_ID) or await self.fetch_channel(PUZZLE_CHANNEL_ID)
+        except Exception as e:
+            print(f"idle puzzle channel fetch failed: {e}")
+            return
+        puzzle = next_puzzle()
+        _active_puzzles[PUZZLE_CHANNEL_ID] = puzzle
+        await channel.send(
+            f"Puzzle time! It has been quiet in here.\n{puzzle['q']}\n"
+            "First correct answer wins. Just type your answer in this channel."
+        )
+        log_line(f"PUZZLE AUTO-ASK in #{channel.name}: {puzzle['q']}")
+        await self.report(f"PUZZLE AUTO-ASK in #{channel.name}: {puzzle['q']}")
+
+    @_idle_puzzle_check.before_loop
+    async def _wait_ready(self):
+        await self.wait_until_ready()
+
 
     async def report(self, line: str) -> None:
         """Post a short note to #bot-logs so Muse can read it later.
@@ -166,6 +265,8 @@ class Marrow(discord.Client):
             return
         if ALLOWED_CHANNEL_IDS and message.channel.id not in ALLOWED_CHANNEL_IDS:
             return
+        # Any message counts as activity, for the 2 hour quiet check.
+        _last_activity[message.channel.id] = asyncio.get_event_loop().time()
         text = message.content.strip()
 
         if HELP_RE.search(text):
@@ -177,8 +278,80 @@ class Marrow(discord.Client):
                 "`Hey Marrow give @user 10 DHC` - Byron only, I pass it to Muse, I send nothing myself\n"
                 "`Hey Marrow give @user a reward NFT` - Byron only, same, passed to Muse\n"
                 "`Hey Marrow register @user waxaccount` - Byron only\n"
+                "`Hey Marrow start puzzle` - Byron only, anyone can answer in the channel\n"
+                "`Hey Marrow stop puzzle` - Byron only\n"
                 "Only Byron can trigger rewards."
             )
+            return
+
+        m = PUZZLE_START_RE.search(text)
+        if m:
+            if message.author.id != BYRON_DISCORD_ID:
+                await message.reply("Only Byron can start a puzzle.")
+                return
+            if message.channel.id in _active_puzzles:
+                await message.reply("A puzzle is already running here. Say 'Hey Marrow stop puzzle' to end it first.")
+                return
+            _pending_another.pop(message.channel.id, None)
+            puzzle = next_puzzle()
+            _active_puzzles[message.channel.id] = puzzle
+            await message.reply(
+                f"Puzzle time!\n{puzzle['q']}\nFirst correct answer wins. Just type your answer in this channel, no need to say my name."
+            )
+            log_line(f"PUZZLE START by Byron in #{message.channel.name}: {puzzle['q']}")
+            await self.report(f"PUZZLE START in #{message.channel.name}: {puzzle['q']}")
+            return
+
+        m = PUZZLE_STOP_RE.search(text)
+        if m:
+            if message.author.id != BYRON_DISCORD_ID:
+                await message.reply("Only Byron can stop a puzzle.")
+                return
+            puzzle = _active_puzzles.pop(message.channel.id, None)
+            if not puzzle:
+                await message.reply("No puzzle is running here right now.")
+                return
+            await message.reply("Puzzle stopped. The answer was: " + sorted(puzzle["answers"])[0] + ".")
+            log_line(f"PUZZLE STOP by Byron in #{message.channel.name}")
+            return
+
+        m = PUZZLE_SHOW_RE.search(text)
+        if m:
+            puzzle = _active_puzzles.get(message.channel.id)
+            if puzzle:
+                await message.reply(puzzle["q"] + "\nFirst correct answer wins.")
+            else:
+                await message.reply("No puzzle is running right now. Byron can start one with 'Hey Marrow start puzzle'.")
+            return
+
+        # "Do you want another question?" reply, after a win.
+        if message.channel.id in _pending_another:
+            ans = normalize_answer(text)
+            if ans in {"yes", "yeah", "yep", "sure", "ok", "okay", "please", "yes please"}:
+                _pending_another.pop(message.channel.id, None)
+                puzzle = next_puzzle()
+                _active_puzzles[message.channel.id] = puzzle
+                await message.reply(
+                    f"Puzzle time!\n{puzzle['q']}\nFirst correct answer wins. Just type your answer in this channel."
+                )
+                log_line(f"PUZZLE ANOTHER in #{message.channel.name}: {puzzle['q']}")
+                return
+            if ans in {"no", "nah", "nope", "not right now"}:
+                _pending_another.pop(message.channel.id, None)
+                await message.reply("No problem, I will ask again later.")
+                return
+
+        # Puzzle answers: anyone can answer, no need to say Marrow's name.
+        puzzle = _active_puzzles.get(message.channel.id)
+        if puzzle and normalize_answer(text) in puzzle["answers"]:
+            _active_puzzles.pop(message.channel.id, None)
+            _pending_another[message.channel.id] = asyncio.get_event_loop().time()
+            winner = message.author.mention
+            await message.reply(
+                f"Yeah, you're right, {winner}! Do you want another question?"
+            )
+            log_line(f"PUZZLE WINNER {message.author} ({message.author.id}) in #{message.channel.name}: {puzzle['q']}")
+            await self.report(f"PUZZLE WINNER {message.author} in #{message.channel.name}. Muse to check with Byron about a prize.")
             return
 
         m = BYRON_REGISTER_RE.search(text)
