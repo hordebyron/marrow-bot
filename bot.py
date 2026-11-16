@@ -40,6 +40,7 @@ import json
 import os
 import random
 import re
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -106,6 +107,7 @@ PUZZLE_SHOW_RE = re.compile(rf"{PREFIX}\s+puzzle", re.IGNORECASE)
 # on its own, and asks no more until someone answers it.
 PUZZLES_PATH = HERE / "puzzles.json"
 USED_PATH = DATA_DIR / "puzzle-used.json"
+LAST_ACTIVITY_PATH = DATA_DIR / "last-activity.json"
 
 def normalize_answer(text: str) -> str:
     text = text.strip().lower()
@@ -146,7 +148,27 @@ def next_puzzle():
 
 _active_puzzles = {}
 _pending_another = {}   # channel id -> time a win was announced
-_last_activity = {}     # channel id -> monotonic time of last message
+
+# Last message time per channel, as wall-clock seconds (time.time),
+# saved to disk. The old version kept this only in memory on the
+# monotonic clock, so every restart or reconnect reset the 2 hour
+# quiet timer to zero and the auto-ask never fired.
+def _load_last_activity():
+    raw = load_json(LAST_ACTIVITY_PATH, {})
+    out = {}
+    for k, v in raw.items():
+        try:
+            if float(v) > 1_000_000_000:
+                out[int(k)] = float(v)
+        except (TypeError, ValueError):
+            pass
+    return out
+
+def save_last_activity():
+    LAST_ACTIVITY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LAST_ACTIVITY_PATH.write_text(json.dumps({str(k): v for k, v in _last_activity.items()}, indent=2) + "\n")
+
+_last_activity = _load_last_activity()
 IDLE_SECONDS = 2 * 60 * 60
 PUZZLE_CHANNEL_ID = int((CONFIG.get("allowed_channel_ids") or [0])[0] or 0)
 
@@ -208,7 +230,10 @@ class Marrow(discord.Client):
         print(f"Marrow logged in as {self.user}")
         print(f"Byron Discord ID set: {bool(BYRON_DISCORD_ID)}")
         print(f"Puzzle questions loaded: {len(PUZZLES)}")
-        _last_activity[PUZZLE_CHANNEL_ID] = asyncio.get_event_loop().time()
+        # Only set it if there is no saved value. A restart or a
+        # reconnect must not restart the 2 hour quiet timer.
+        _last_activity.setdefault(PUZZLE_CHANNEL_ID, time.time())
+        save_last_activity()
         if PUZZLE_CHANNEL_ID and not self._idle_puzzle_check.is_running():
             self._idle_puzzle_check.start()
 
@@ -220,7 +245,7 @@ class Marrow(discord.Client):
         'do you want another question' reply."""
         if not PUZZLE_CHANNEL_ID or not PUZZLES:
             return
-        now = asyncio.get_event_loop().time()
+        now = time.time()
         last = _last_activity.get(PUZZLE_CHANNEL_ID, now)
         if now - last < IDLE_SECONDS:
             return
@@ -266,7 +291,8 @@ class Marrow(discord.Client):
         if ALLOWED_CHANNEL_IDS and message.channel.id not in ALLOWED_CHANNEL_IDS:
             return
         # Any message counts as activity, for the 2 hour quiet check.
-        _last_activity[message.channel.id] = asyncio.get_event_loop().time()
+        _last_activity[message.channel.id] = time.time()
+        save_last_activity()
         text = message.content.strip()
 
         if HELP_RE.search(text):
@@ -345,7 +371,7 @@ class Marrow(discord.Client):
         puzzle = _active_puzzles.get(message.channel.id)
         if puzzle and normalize_answer(text) in puzzle["answers"]:
             _active_puzzles.pop(message.channel.id, None)
-            _pending_another[message.channel.id] = asyncio.get_event_loop().time()
+            _pending_another[message.channel.id] = time.time()
             winner = message.author.mention
             await message.reply(
                 f"Yeah, you're right, {winner}! Do you want another question?"
