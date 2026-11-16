@@ -114,6 +114,22 @@ def normalize_answer(text: str) -> str:
     text = re.sub(r"[^a-z0-9 ]", "", text)
     return re.sub(r"\s+", " ", text).strip()
 
+def matches_answer(text: str, answers) -> bool:
+    """True when any accepted answer appears as whole words in the
+    message, not just when the whole message is the answer. So
+    'I think it is a zombie' counts for 'a zombie', but 'red' does
+    not count for 'ed' and 'thank you' does not count for 'tank'.
+    A trailing s is allowed, so 'zombies' counts for 'zombie'."""
+    cleaned = normalize_answer(text)
+    if not cleaned:
+        return False
+    for ans in answers:
+        if not ans:
+            continue
+        if re.search(r"\b" + re.escape(ans) + r"s?\b", cleaned):
+            return True
+    return False
+
 def load_puzzles():
     data = load_json(PUZZLES_PATH, [])
     out = []
@@ -368,8 +384,9 @@ class Marrow(discord.Client):
                 return
 
         # Puzzle answers: anyone can answer, no need to say Marrow's name.
+        # The answer just has to appear as whole words in the message.
         puzzle = _active_puzzles.get(message.channel.id)
-        if puzzle and normalize_answer(text) in puzzle["answers"]:
+        if puzzle and matches_answer(text, puzzle["answers"]):
             _active_puzzles.pop(message.channel.id, None)
             _pending_another[message.channel.id] = time.time()
             winner = message.author.mention
