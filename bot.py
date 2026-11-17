@@ -85,7 +85,7 @@ REWARD_SOME_RE = re.compile(
     re.IGNORECASE,
 )
 SELF_REGISTER_RE = re.compile(
-    rf"{PREFIX}\s+(?:my\s+wax\s+is|register(?:\s+me)?(?:\s+as)?)\s+([a-z1-5.]{{1,12}})",
+    rf"{PREFIX}\s+(?:my\s+wax(?:\s+name)?\s+(?:is|ez)|register(?:\s+me)?(?:\s+as)?)\s+([a-z1-5.]{{1,12}})",
     re.IGNORECASE,
 )
 BYRON_REGISTER_RE = re.compile(
@@ -310,6 +310,10 @@ class Marrow(discord.Client):
         _last_activity[message.channel.id] = time.time()
         save_last_activity()
         text = message.content.strip()
+        # Turn a Marrow mention into the word Marrow, so "@Marrow my wax
+        # is x.wam" matches the same patterns as "Hey Marrow my wax is x.wam".
+        if self.user is not None:
+            text = re.sub(rf"<@!?{self.user.id}>", "Marrow", text)
 
         if HELP_RE.search(text):
             if message.author.id != BYRON_DISCORD_ID:
@@ -418,7 +422,7 @@ class Marrow(discord.Client):
             data = wallets()
             data[did] = wax
             save_wallets(data)
-            await message.reply(f"Got it, {message.author.mention}. I wrote down your WAX name `{wax}`, Muse will add you to the whitelist for the WANT ON THE LIST drop.")
+            await message.reply("got it thanks, will update the records in 1 or 2 hours")
             log_line(f"WHITELIST {message.author} ({did}) -> {wax}")
             await self.report(f"{message.author} registered WAX `{wax}` for the WANT ON THE LIST drop.")
             return
